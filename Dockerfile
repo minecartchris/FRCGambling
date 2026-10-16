@@ -8,7 +8,10 @@ COPY package.json ./
 COPY server ./server
 COPY public ./public
 
-RUN mkdir -p /data && chown node:node /data
+# The checkout WebManager builds from can have owner-only permissions, and
+# COPY keeps them, so the non-root user couldn't read the code. Make the app
+# readable (but not writable) by everyone, and /data writable by the app.
+RUN chmod -R a+rX /app && mkdir -p /data && chown node:node /data
 USER node
 
 EXPOSE 8080
