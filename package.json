@@ -1,0 +1,16 @@
+{
+  "name": "frc-match-predictor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Win probabilities and predicted scores for FRC matches (TBA + Statbotics + Jev AI).",
+  "type": "module",
+  "main": "server/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/server.js",
+    "dev": "node --env-file-if-exists=.env server/server.js",
+    "test": "node --test test/*.test.js"
+  }
+}

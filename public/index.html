@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FRC Match Predictor</title>
+  <meta name="description" content="Win probabilities and predicted scores for FIRST Robotics Competition matches.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 22a12 12 0 0 1 24 0" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/><path d="M16 22 9 13" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><circle cx="16" cy="22" r="2.6" fill="currentColor"/></svg>
+      <span>FRC Match Predictor</span>
+    </div>
+    <div class="pickers">
+      <label class="field">
+        <span>Season</span>
+        <select id="year"></select>
+      </label>
+      <label class="field grow">
+        <span>Event</span>
+        <input id="eventSearch" list="eventList" placeholder="Search events…" autocomplete="off" spellcheck="false">
+        <datalist id="eventList"></datalist>
+      </label>
+    </div>
+    <div class="status" id="status"></div>
+  </header>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <main id="main">
+    <section class="hero card" aria-live="polite">
+      <div class="hero-head">
+        <button class="icon-btn" id="prevMatch" aria-label="Previous match">‹</button>
+        <div class="match-pick">
+          <select id="matchSelect" aria-label="Match"></select>
+          <div class="match-meta" id="matchMeta"></div>
+        </div>
+        <button class="icon-btn" id="nextMatch" aria-label="Next match">›</button>
+      </div>
+
+      <div class="gauge">
+        <svg viewBox="0 0 320 178" role="img" aria-labelledby="gaugeTitle">
+          <title id="gaugeTitle">Win probability gauge</title>
+          <path class="gauge-track" d="M 40 160 A 120 120 0 0 1 280 160"/>
+          <!-- Red half on the left, blue half on the right. The full red arc gives the
+               rounded left end; the blue half uses butt caps so it meets red cleanly
+               at the top, and a circle rounds its right end. -->
+          <path class="gauge-arc red" d="M 40 160 A 120 120 0 0 1 280 160"/>
+          <path class="gauge-arc blue" d="M 160 40 A 120 120 0 0 1 280 160"/>
+          <circle class="gauge-cap blue" cx="280" cy="160" r="14"/>
+          <g class="gauge-ticks" id="gaugeTicks"></g>
+          <g class="gauge-needle" id="needle" style="transform: rotate(90deg)">
+            <path d="M 160 154 L 58 160 L 160 166 Z"/>
+          </g>
+          <circle class="gauge-hub" cx="160" cy="160" r="11"/>
+          <circle class="gauge-hub-dot" cx="160" cy="160" r="4"/>
+        </svg>
+        <div class="gauge-side red">
+          <span class="side-pct" id="redPct">--</span>
+          <span class="side-label">Red Alliance</span>
+          <span class="side-sub">win probability</span>
+        </div>
+        <div class="gauge-side blue">
+          <span class="side-pct" id="bluePct">--</span>
+          <span class="side-label">Blue Alliance</span>
+          <span class="side-sub">win probability</span>
+        </div>
+      </div>
+
+      <div class="verdict" id="verdict"></div>
+
+      <div class="scoreline">
+        <div class="score red"><span class="score-num" id="redScore">--</span><span class="score-cap">Red predicted</span></div>
+        <div class="winning">
+          <span class="winning-cap">Predicted winning score</span>
+          <span class="winning-num" id="winScore">--</span>
+          <span class="winning-range" id="winRange"></span>
+        </div>
+        <div class="score blue"><span class="score-num" id="blueScore">--</span><span class="score-cap">Blue predicted</span></div>
+      </div>
+
+      <div class="models" id="models"></div>
+      <div class="actual" id="actual" hidden></div>
+    </section>
+
+    <section class="alliances">
+      <div class="alliance red card">
+        <h2><span class="dot"></span>Red Alliance</h2>
+        <div class="team-cards" id="redTeams"></div>
+      </div>
+      <div class="alliance blue card">
+        <h2><span class="dot"></span>Blue Alliance</h2>
+        <div class="team-cards" id="blueTeams"></div>
+      </div>
+    </section>
+    <p class="hint">Bias sliders change a team's expected points by up to ±35% of an average team. They're saved in this browser and apply to every match.</p>
+
+    <section class="lower">
+      <div class="card matches">
+        <div class="card-head">
+          <h2>All matches</h2>
+          <div class="tabs" role="tablist" id="matchTabs">
+            <button role="tab" data-tab="upcoming" aria-selected="true">Upcoming</button>
+            <button role="tab" data-tab="completed">Completed</button>
+            <button role="tab" data-tab="all">All</button>
+          </div>
+          <input id="teamFilter" class="filter" placeholder="Filter by team #" inputmode="numeric" autocomplete="off">
+        </div>
+        <div class="table-wrap">
+          <table class="match-table">
+            <thead><tr><th>Match</th><th class="hide-sm">Time</th><th>Red</th><th>Blue</th><th>Prediction</th><th>Result</th></tr></thead>
+            <tbody id="matchRows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <aside class="side">
+        <div class="card" id="accuracy"></div>
+        <div class="card" id="season" hidden></div>
+        <div class="card how">
+          <h2>How the prediction works</h2>
+          <ol>
+            <li><b>History:</b> each team starts at its Statbotics EPA entering the event or, if that's unavailable, its points per match (OPR) at its earlier events this season. Win/loss record adds a small edge.</li>
+            <li><b>Today's matches:</b> every completed match at the event updates the ratings. The latest day of play counts the most.</li>
+            <li><b>Your bias:</b> the sliders nudge teams up or down.</li>
+            <li><b>Jev AI:</b> when enabled, Jev reads all of this and picks a winner and score band. Its answer is blended with the stats model.</li>
+            <li><b>Auto-tuning:</b> once a day the model replays recent finished events and keeps the settings with the smallest score miss.</li>
+            <li><b>Limits:</b> scores swing from match to match (breakdowns, penalties, luck). Even in hindsight a typical alliance score is off by about 18% of the average, so ±5 points is rare.</li>
+          </ol>
+        </div>
+      </aside>
+    </section>
+
+    <section class="card teams">
+      <div class="card-head">
+        <h2>Teams at this event</h2>
+        <button class="text-btn" id="resetBias">Reset all bias</button>
+      </div>
+      <div class="table-wrap">
+        <table class="team-table">
+          <thead>
+            <tr>
+              <th data-sort="rank">Rank</th>
+              <th data-sort="id">Team</th>
+              <th data-sort="wins">Event W-L-T</th>
+              <th data-sort="rating" title="Points per match, updated with this event's results">Rating now</th>
+              <th data-sort="delta" class="hide-sm" title="Change since entering the event">Trend</th>
+              <th data-sort="epa" class="hide-sm">Season EPA</th>
+              <th data-sort="winrate" class="hide-sm">Season W-L</th>
+              <th data-sort="bias">Bias</th>
+            </tr>
+          </thead>
+          <tbody id="teamRows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="teamDialog">
+    <div class="dialog-body" id="teamDetail"></div>
+  </dialog>
+
+  <footer class="foot">Data from The Blue Alliance and Statbotics. Predictions are estimates, not guarantees.</footer>
+</body>
+</html>

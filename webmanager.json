@@ -1,0 +1,30 @@
+{
+  "type": "app",
+  "health": "/api/health",
+  "memory_mb": 256,
+  "env": [
+    {
+      "name": "TBA_API_KEY",
+      "description": "The Blue Alliance read API key (free: thebluealliance.com/account). Used for schedules, live scores and rankings. Without it the app falls back to Statbotics.",
+      "secret": true
+    },
+    {
+      "name": "JEV_API_KEY",
+      "description": "Jev key: either a Vercel AI Gateway key (starts with vck_) or a TypeSafe key. The app picks the right endpoint automatically. Leave blank to use only the statistical model.",
+      "secret": true
+    },
+    {
+      "name": "JEV_WEIGHT",
+      "description": "How much Jev's answer counts in the blended prediction, 0 to 1.",
+      "default": "0.5"
+    },
+    {
+      "name": "JEV_MODEL",
+      "description": "Optional. Leave blank for the default (typesafe-ai/jev on AI Gateway, jev-latest on TypeSafe)."
+    },
+    {
+      "name": "JEV_API_URL",
+      "description": "Optional. Leave blank to pick automatically from the key type."
+    }
+  ]
+}
