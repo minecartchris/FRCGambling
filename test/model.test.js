@@ -35,15 +35,16 @@ test("event results pull ratings toward what teams actually score", () => {
   const p = predictMatch(match("m99", ["1", "2", "3"], ["4", "5", "6"]), fit);
   assert.ok(p.redWinProb > 0.8);
   assert.equal(p.winner, "red");
-  assert.ok(Math.abs(p.winningScore - p.redScore) < 1e-9);
+  // the winner usually had a good day, so the winning score sits a bit above the favorite's prediction
+  assert.ok(p.winningScore >= p.redScore && p.winningScore < p.redScore + p.sd);
 });
 
 test("bias moves win probability in the expected direction", () => {
   const fit = fitRatings(["1", "2", "3", "4", "5", "6"], { 1: 20, 2: 20, 3: 20, 4: 20, 5: 20, 6: 20 }, []);
   const m = match("m1", ["1", "2", "3"], ["4", "5", "6"]);
   assert.ok(Math.abs(predictMatch(m, fit).redWinProb - 0.5) < 1e-9);
-  assert.ok(predictMatch(m, fit, { bias: { 1: 100 } }).redWinProb > 0.6);
-  assert.ok(predictMatch(m, fit, { bias: { 4: 100 } }).redWinProb < 0.4);
+  assert.ok(predictMatch(m, fit, { bias: { 1: 100 } }).redWinProb > 0.55);
+  assert.ok(predictMatch(m, fit, { bias: { 4: 100 } }).redWinProb < 0.45);
 });
 
 test("latest day of play is weighted most", () => {
@@ -99,4 +100,24 @@ test("history prior weights the latest earlier event most and ignores later ones
   assert.ok(Math.abs(historyPrior(h, "254", "2026-04-01") - 50 / 1.5) < 1e-9);
   assert.equal(historyPrior(h, "254", "2026-02-01"), null);
   assert.ok(Math.abs(historyPrior(h, "254", "2026-04-01", 1.1) - (50 / 1.5) * 1.1) < 1e-9);
+});
+
+test("over/under probabilities are consistent", async () => {
+  const { overProb, winQuantile } = await import("../public/lib/model.js");
+  const pred = { redScore: 100, blueScore: 80, sd: 20 };
+  assert.ok(Math.abs(overProb(pred, "red", 100) - 0.5) < 1e-6);
+  assert.ok(Math.abs(overProb(pred, "total", 180) - 0.5) < 1e-6);
+  const median = winQuantile(100, 80, 20, 0.5);
+  assert.ok(Math.abs(overProb(pred, "winning", median) - 0.5) < 1e-4);
+  assert.ok(median > 100, "winning score median is above the higher prediction");
+  assert.ok(overProb(pred, "winning", 150) < overProb(pred, "winning", 120));
+});
+
+test("calibration bins group by favorite probability", async () => {
+  const { calibrationBins } = await import("../public/lib/model.js");
+  const bins = calibrationBins([{ p: 0.85, won: true }, { p: 0.15, won: true }, { p: 0.55, won: false }]);
+  const b80 = bins.find((b) => b.lo === 0.8);
+  assert.equal(b80.n, 2);
+  assert.equal(b80.actual, 0.5); // red favored and won; blue favored (p=0.15) but red won
+  assert.equal(bins.find((b) => b.lo === 0.5).actual, 0);
 });

@@ -2,7 +2,7 @@
 // and keeps the ones with the smallest average score miss. Runs in the
 // background at startup and once a day; results are saved in DATA_DIR so the
 // model keeps what it learned across restarts.
-import { DEFAULTS, ScoreStats, TUNABLE, fitRatings, predictMatch } from "../public/lib/model.js";
+import { DEFAULTS, ScoreStats, TUNABLE, calibrationBins, fitRatings, predictMatch } from "../public/lib/model.js";
 import { convertMatches, tbaEnabled } from "./tba.js";
 import { finishedEventData, historyPrior, seasonEvents, seasonHistoryReady } from "./history.js";
 import { readJson, writeJson } from "./store.js";
@@ -14,8 +14,10 @@ const GRID = {
   elimScale: [0.9, 0.95, 1, 1.05, 1.1],
   priorScale: [0.9, 1, 1.1, 1.2],
 };
+const SPREADS = [1, 1.2, 1.35, 1.5, 1.65, 1.8, 2];
 const MAX_EVENTS = 60;
 const EVERY_MS = 24 * 3600_000;
+const VERSION = 2; // bump when the model changes so saved settings get re-tuned
 
 let tuning = null; // { params, before, after, events, matches, tunedAt, year }
 let running = null;
@@ -46,7 +48,8 @@ async function dataset(year) {
 
 async function evaluate(data, opts) {
   const stats = new ScoreStats();
-  let wins = 0, correct = 0;
+  const calib = [];
+  let wins = 0, correct = 0, brier = 0;
   for (const d of data) {
     const priors = Object.fromEntries(Object.entries(d.basePriors).map(([t, v]) => [t, v == null ? null : v * opts.priorScale]));
     for (let i = 0; i < d.matches.length; i++) {
@@ -56,13 +59,16 @@ async function evaluate(data, opts) {
       const p = predictMatch(m, fit, { opts });
       stats.add(p, m);
       if (m.red.score !== m.blue.score) {
+        const redWon = m.red.score > m.blue.score;
         wins++;
-        if ((p.redWinProb >= 0.5) === (m.red.score > m.blue.score)) correct++;
+        if ((p.redWinProb >= 0.5) === redWon) correct++;
+        brier += (p.redWinProb - (redWon ? 1 : 0)) ** 2;
+        calib.push({ p: p.redWinProb, won: redWon });
       }
     }
     await pause(); // keep the server responsive while tuning
   }
-  return { ...stats.summary(), accuracy: wins ? correct / wins : null };
+  return { ...stats.summary(), accuracy: wins ? correct / wins : null, brier: wins ? brier / wins : null, calibration: calibrationBins(calib) };
 }
 
 export async function tune(year) {
@@ -75,7 +81,7 @@ export async function tune(year) {
       return tuning;
     }
     const before = await evaluate(data, { ...DEFAULTS });
-    let best = { ...DEFAULTS, ...(tuning?.year === year ? tuning.params : {}) };
+    let best = { ...DEFAULTS, ...(tuning?.year === year && tuning.version === VERSION ? tuning.params : {}) };
     let bestR = await evaluate(data, best);
     for (let pass = 0; pass < 2; pass++) {
       let improved = false;
@@ -93,7 +99,18 @@ export async function tune(year) {
       }
       if (!improved) break;
     }
+    // Spread doesn't change the average miss; tune it so the 80% range holds ~80%.
+    for (const spreadScale of SPREADS) {
+      if (best.spreadScale === spreadScale) continue;
+      const cand = { ...best, spreadScale };
+      const r = await evaluate(data, cand);
+      if (Math.abs(r.rangeHit - 0.8) < Math.abs(bestR.rangeHit - 0.8)) {
+        best = cand;
+        bestR = r;
+      }
+    }
     tuning = {
+      version: VERSION,
       year,
       params: pick(best),
       before,
@@ -118,7 +135,7 @@ export async function startTuner(seasonFn) {
   if (!tbaEnabled()) return;
   const runIfStale = async () => {
     const year = await seasonFn();
-    if (!tuning || tuning.year !== year || Date.now() - tuning.tunedAt > EVERY_MS) await tune(year);
+    if (!tuning || tuning.version !== VERSION || tuning.year !== year || Date.now() - tuning.tunedAt > EVERY_MS) await tune(year);
   };
   setTimeout(runIfStale, 5_000).unref();
   setInterval(runIfStale, 3600_000).unref();

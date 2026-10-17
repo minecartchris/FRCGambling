@@ -1,4 +1,4 @@
-import { predictMatch } from "/lib/model.js";
+import { expectedLine, overProb, predictMatch } from "/lib/model.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -23,6 +23,10 @@ const S = {
   sort: { key: "rank", asc: true },
   jev: {},          // cacheKey -> { status, result, error }
   refreshTimer: null,
+  ou: { kind: "winning", line: null, auto: true },
+  betsAll: false,
+  calibSrc: null,
+  accuracy: null,
 };
 
 /* ---------- boot ---------- */
@@ -196,6 +200,8 @@ function renderAll() {
   renderMatches();
   renderAccuracy();
   renderTeams();
+  renderBets();
+  renderCalibration();
   loadAccuracy();
   updateHash();
 }
@@ -262,6 +268,7 @@ function renderHero() {
     $("models").innerHTML = "";
     $("actual").hidden = true;
     $("matchMeta").textContent = S.data?.event.name || "";
+    renderOU();
     return;
   }
   const { stats, jev, final } = combined(m);
@@ -318,6 +325,7 @@ function renderHero() {
     act.hidden = false;
   } else act.hidden = true;
 
+  renderOU();
   requestJev(m);
 }
 
@@ -401,6 +409,194 @@ function renderMatches() {
   if (S.tab === "completed") ms = ms.filter((m) => m.played).slice().reverse();
   if (S.filter) ms = ms.filter((m) => m.red.teams.includes(S.filter) || m.blue.teams.includes(S.filter));
   $("matchRows").innerHTML = ms.length ? ms.map(matchRow).join("") : `<tr><td colspan="6" class="empty">${S.tab === "upcoming" ? "No upcoming matches" : "No matches"}${S.filter ? ` for team ${esc(S.filter)}` : ""}</td></tr>`;
+}
+
+/* ---------- over / under ---------- */
+
+const NICE = [1, 2, 5, 10, 20, 25, 50, 100];
+const niceStep = (x) => NICE.find((s) => s >= x) || 100;
+const OU_NAMES = { winning: "winning score", red: "Red's score", blue: "Blue's score", total: "total points" };
+
+function actualFor(m, kind) {
+  if (kind === "red") return m.red.score;
+  if (kind === "blue") return m.blue.score;
+  if (kind === "total") return m.red.score + m.blue.score;
+  return Math.max(m.red.score, m.blue.score);
+}
+
+function renderOU() {
+  const m = matchOf(S.matchKey);
+  const box = $("ou");
+  if (!m || !S.data?.fit.hasData) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const p = predict(m);
+  const { kind } = S.ou;
+  document.querySelectorAll("#ouKind button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.kind === kind)));
+  const exp = expectedLine(p, kind);
+  const spread = kind === "total" ? p.sd * Math.SQRT2 : p.sd;
+  const step = niceStep(spread / 4);
+  // Half-point lines, like a sportsbook, so there's never a push.
+  const base = Math.floor(exp) + 0.5;
+  if (S.ou.auto || S.ou.line == null) S.ou.line = base;
+  S.ou.step = step;
+  const line = S.ou.line;
+  const over = overProb(p, kind, line);
+  $("ouLine").value = line;
+  $("ouOver").textContent = pct(over);
+  $("ouUnder").textContent = pct(1 - over);
+
+  const tableStep = niceStep(spread / 2);
+  $("ouLines").innerHTML = [-2, -1, 0, 1, 2]
+    .map((k) => {
+      const l = base + k * tableStep;
+      const o = overProb(p, kind, l);
+      return `<button class="ou-row${l === line ? " on" : ""}" data-line="${l}">
+        <span class="ou-l">${l}</span>
+        <span class="ou-bar"><span style="width:${o * 100}%"></span></span>
+        <span class="ou-p">O ${pct(o)} · U ${pct(1 - o)}</span>
+      </button>`;
+    })
+    .join("");
+
+  const hit = S.accuracy?.tuning?.after?.rangeHit ?? S.data.accuracy?.rangeHit;
+  let note = `Chance the ${OU_NAMES[kind]} goes over or under the line. Expected ${pts(exp)}. Stats model, including your bias.`;
+  if (Number.isFinite(hit)) note += ` Checked against real results: ${pct(hit)} of scores land in the model's 80% range.`;
+  if (m.played) {
+    const a = actualFor(m, kind);
+    note = `Final ${OU_NAMES[kind]}: <b>${a}</b>, which went <b>${a > line ? "over" : "under"}</b> ${line}. ` + note;
+  }
+  $("ouNote").innerHTML = note;
+}
+
+/* ---------- best bets ---------- */
+
+const TIERS = [
+  { lo: 0.8, name: "Lock", cls: "lock" },
+  { lo: 0.7, name: "Strong", cls: "strong" },
+  { lo: 0.6, name: "Lean", cls: "lean" },
+  { lo: 0, name: "Toss-up", cls: "toss" },
+];
+const tierOf = (f) => TIERS.find((t) => f >= t.lo);
+
+// How often picks at this confidence actually won (recent events, else this event).
+function tierRecord(tier) {
+  const recent = S.accuracy?.tuning?.after?.calibration;
+  const bins = recent || S.data.accuracy?.calibration;
+  if (!bins) return null;
+  const where = recent ? "recently" : "at this event";
+  const hi = TIERS[TIERS.indexOf(tier) - 1]?.lo ?? 1.01;
+  const inTier = bins.filter((b) => b.lo >= Math.max(0.5, tier.lo) && b.lo < hi);
+  const n = inTier.reduce((s, b) => s + b.n, 0);
+  const wins = inTier.reduce((s, b) => s + (b.actual ?? 0) * b.n, 0);
+  return n >= 10 ? { n, rate: wins / n, where } : null;
+}
+
+function renderBets() {
+  const list = $("betsList");
+  const more = $("betsMore");
+  const ups = S.data.fit.hasData ? S.data.matches.filter((m) => !m.played) : [];
+  if (!ups.length) {
+    list.innerHTML = `<div class="empty">No upcoming matches at this event.</div>`;
+    more.hidden = true;
+    $("betsSub").textContent = "";
+    return;
+  }
+  const rows = ups
+    .map((m) => {
+      const p = predict(m);
+      return { m, p, fav: Math.max(p.redWinProb, p.blueWinProb) };
+    })
+    .sort((a, b) => b.fav - a.fav);
+  const shown = S.betsAll ? rows : rows.slice(0, 6);
+  list.innerHTML = shown
+    .map(({ m, p, fav }) => {
+      const tier = tierOf(fav);
+      const rec = tierRecord(tier);
+      const side = p.winner;
+      const ou = Math.round(p.winningScore) + 0.5;
+      return `<button class="bet" data-match="${esc(m.key)}">
+        <span class="tier ${tier.cls}" title="${rec ? `Picks like this won ${pct(rec.rate)} of ${rec.n} matches ${rec.where}` : ""}">${tier.name}</span>
+        <span class="bet-match"><b>${esc(m.label)}</b><span>${esc(fmtTime(m.time))}</span></span>
+        <span class="bet-pick ${side}"><b>${side === "red" ? "Red" : "Blue"} ${pct(fav)}</b><span>${m[side].teams.map(esc).join(" · ")}</span></span>
+        <span class="bet-rec">${rec ? `${tier.name} picks won ${pct(rec.rate)} ${rec.where}` : ""}</span>
+        <span class="bet-ou">Win score O/U <b>${ou}</b></span>
+      </button>`;
+    })
+    .join("");
+  more.hidden = rows.length <= 6;
+  more.textContent = S.betsAll ? "Show top 6" : `Show all ${rows.length} upcoming`;
+  $("betsSub").textContent = "Most confident first · stats model + your bias";
+}
+
+/* ---------- calibration chart ---------- */
+
+function calibSources() {
+  const out = [];
+  const t = S.accuracy?.tuning;
+  const live = S.accuracy?.live?.overall;
+  const has = (bins) => bins && bins.some((b) => b.n > 0);
+  if (has(S.data?.accuracy?.calibration)) out.push({ id: "event", label: "This event", bins: S.data.accuracy.calibration });
+  if (has(t?.after?.calibration)) out.push({ id: "recent", label: `Last ${t.events} events`, bins: t.after.calibration });
+  if (has(live?.calibration)) out.push({ id: "live", label: "Live", bins: live.calibration });
+  if (has(live?.jev?.calibration)) out.push({ id: "jev", label: "Live Jev", bins: live.jev.calibration });
+  return out;
+}
+
+function renderCalibration() {
+  const sources = calibSources();
+  const chart = $("calibChart");
+  if (!sources.length) {
+    $("calibSource").innerHTML = "";
+    chart.innerHTML = `<div class="empty">Shows up after a few matches are played.</div>`;
+    $("calibTable").innerHTML = "";
+    return;
+  }
+  // Default to the biggest sample (recent events) until the viewer picks a tab.
+  if (!S.calibPicked || !sources.some((s) => s.id === S.calibSrc)) S.calibSrc = (sources.find((s) => s.id === "recent") || sources[0]).id;
+  const src = sources.find((s) => s.id === S.calibSrc);
+  $("calibSource").innerHTML = sources.map((s) => `<button role="tab" data-src="${s.id}" aria-selected="${s.id === src.id}">${esc(s.label)}</button>`).join("");
+
+  const W = 300, H = 230, L = 40, R = 290, T = 12, B = 190;
+  const x = (v) => L + ((v - 0.5) / 0.5) * (R - L);
+  const y = (v) => B - ((v - 0.3) / 0.7) * (B - T);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Predicted chance versus how often favorites actually won">`;
+  for (const g of [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1]) svg += `<line class="grid" x1="${L}" x2="${R}" y1="${y(g)}" y2="${y(g)}"/><text class="tick" x="${L - 6}" y="${y(g) + 3}" text-anchor="end">${Math.round(g * 100)}%</text>`;
+  for (const g of [0.5, 0.6, 0.7, 0.8, 0.9, 1]) svg += `<text class="tick" x="${x(g)}" y="${B + 14}" text-anchor="middle">${Math.round(g * 100)}%</text>`;
+  svg += `<line class="ideal" x1="${x(0.5)}" y1="${y(0.5)}" x2="${x(1)}" y2="${y(1)}"/>`;
+  svg += `<text class="axis" x="${(L + R) / 2}" y="${H - 6}" text-anchor="middle">Predicted chance for the favorite</text>`;
+  svg += `<text class="axis" transform="translate(11 ${(T + B) / 2}) rotate(-90)" text-anchor="middle">Actually won</text>`;
+  src.bins.forEach((b, i) => {
+    if (!b.n) return;
+    const cx = x(b.predicted), cy = y(Math.max(0.3, b.actual));
+    svg += `<line class="gap" x1="${cx}" x2="${cx}" y1="${y(b.predicted)}" y2="${cy}"/>`;
+    svg += `<circle class="dot${b.n < 10 ? " few" : ""}" cx="${cx}" cy="${cy}" r="5"/>`;
+    svg += `<circle class="hit" data-bin="${i}" cx="${cx}" cy="${cy}" r="14"/>`;
+  });
+  svg += `</svg><div class="tip" id="calibTip" hidden></div>`;
+  chart.innerHTML = svg;
+
+  const tip = $("calibTip");
+  chart.querySelectorAll(".hit").forEach((c) => {
+    const b = src.bins[Number(c.dataset.bin)];
+    const show = () => {
+      tip.innerHTML = `<b>${Math.round(b.lo * 100)}–${Math.round(Math.min(1, b.hi) * 100)}% favorites</b><br>Predicted ${pct(b.predicted)} · won ${pct(b.actual)}<br>${b.n} matches${b.n < 10 ? " (too few to judge)" : ""}`;
+      tip.hidden = false;
+      const box = chart.getBoundingClientRect();
+      const r = c.getBoundingClientRect();
+      tip.style.left = `${Math.min(box.width - 170, Math.max(0, r.left - box.left - 70))}px`;
+      tip.style.top = `${r.top - box.top - 64}px`;
+    };
+    c.addEventListener("pointerenter", show);
+    c.addEventListener("pointerleave", () => (tip.hidden = true));
+    c.addEventListener("click", show);
+  });
+
+  $("calibTable").innerHTML = `<table><thead><tr><th>Favorite's chance</th><th>Predicted</th><th>Won</th><th>Matches</th></tr></thead><tbody>${src.bins
+    .map((b) => `<tr><td>${Math.round(b.lo * 100)}–${Math.round(Math.min(1, b.hi) * 100)}%</td><td>${b.n ? pct(b.predicted) : "--"}</td><td>${b.n ? pct(b.actual) : "--"}</td><td>${b.n}</td></tr>`)
+    .join("")}</tbody></table>`;
 }
 
 const GOAL = 25;
@@ -489,6 +685,11 @@ async function loadAccuracy() {
     S.accuracy = null;
   }
   renderSeason();
+  if (S.data) {
+    renderCalibration();
+    renderBets();
+    renderOU();
+  }
 }
 
 function teamSortVal(t, key) {
@@ -599,6 +800,7 @@ function openTeam(id) {
 
 function selectMatch(key, scroll = true) {
   S.matchKey = key;
+  S.ou.auto = true;
   renderMatchSelect();
   renderHero();
   renderAlliances();
@@ -625,7 +827,7 @@ function setBias(id, v) {
     });
   }
   clearTimeout(setBias.t);
-  setBias.t = setTimeout(() => { renderMatches(); renderTeams(); }, 150);
+  setBias.t = setTimeout(() => { renderMatches(); renderTeams(); renderBets(); }, 150);
 }
 
 function updateHash() {
@@ -695,6 +897,45 @@ function wireUi() {
     }
   });
   $("teamDialog").addEventListener("click", (e) => { if (e.target === $("teamDialog")) $("teamDialog").close(); });
+
+  $("ouKind").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-kind]");
+    if (!b) return;
+    S.ou = { kind: b.dataset.kind, line: null, auto: true };
+    renderOU();
+  });
+  const nudge = (d) => {
+    S.ou.line = (S.ou.line ?? 0) + d * (S.ou.step || 5);
+    S.ou.auto = false;
+    renderOU();
+  };
+  $("ouMinus").addEventListener("click", () => nudge(-1));
+  $("ouPlus").addEventListener("click", () => nudge(1));
+  $("ouLine").addEventListener("change", (e) => {
+    const v = Number(e.target.value);
+    if (!Number.isFinite(v)) return;
+    S.ou.line = v;
+    S.ou.auto = false;
+    renderOU();
+  });
+  $("ouLines").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-line]");
+    if (!b) return;
+    S.ou.line = Number(b.dataset.line);
+    S.ou.auto = false;
+    renderOU();
+  });
+  $("betsMore").addEventListener("click", () => {
+    S.betsAll = !S.betsAll;
+    renderBets();
+  });
+  $("calibSource").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-src]");
+    if (!b) return;
+    S.calibSrc = b.dataset.src;
+    S.calibPicked = true;
+    renderCalibration();
+  });
 
   $("resetBias").addEventListener("click", () => {
     S.bias = {};

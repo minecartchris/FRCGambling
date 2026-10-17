@@ -1,7 +1,7 @@
 // Live track record: the last prediction made before each match was played,
 // graded against the real score once it's posted. Unlike the event replay,
 // these are predictions people actually saw. Saved in DATA_DIR.
-import { ScoreStats } from "../public/lib/model.js";
+import { ScoreStats, calibrationBins } from "../public/lib/model.js";
 import { readJson, writeJson } from "./store.js";
 
 const FILE = "predictions.json";
@@ -42,7 +42,7 @@ export function recordEvent(event, matches, preds) {
         label: m.label,
         time: m.time,
         at: Date.now(),
-        stats: { red: r1(p.redScore), blue: r1(p.blueScore), redWinProb: Math.round(p.redWinProb * 1000) / 1000 },
+        stats: { red: r1(p.redScore), blue: r1(p.blueScore), win: r1(p.winningScore), sd: r1(p.sd), redWinProb: Math.round(p.redWinProb * 1000) / 1000 },
       };
       dirty = true;
     } else if (rec && !rec.actual) {
@@ -63,14 +63,17 @@ export function recordJev(matchKey, jev) {
 function grade(records) {
   const stats = new ScoreStats();
   let wins = 0, statsRight = 0, jevN = 0, jevRight = 0, jevWinAbs = 0, jevWinN = 0;
+  const statsCal = [], jevCal = [];
   for (const r of records) {
     const { red, blue } = r.actual;
-    stats.add({ redScore: r.stats.red, blueScore: r.stats.blue }, { red: { score: red }, blue: { score: blue } });
+    stats.add({ redScore: r.stats.red, blueScore: r.stats.blue, winningScore: r.stats.win, sd: r.stats.sd }, { red: { score: red }, blue: { score: blue } });
     if (red === blue) continue;
     wins++;
     if ((r.stats.redWinProb >= 0.5) === (red > blue)) statsRight++;
+    statsCal.push({ p: r.stats.redWinProb, won: red > blue });
     if (r.jev) {
       jevN++;
+      jevCal.push({ p: r.jev.redWinProb, won: red > blue });
       if ((r.jev.redWinProb >= 0.5) === (red > blue)) jevRight++;
       if (r.jev.winningScore != null) {
         jevWinN++;
@@ -81,7 +84,8 @@ function grade(records) {
   return {
     ...stats.summary(),
     accuracy: wins ? statsRight / wins : null,
-    jev: jevN ? { matches: jevN, accuracy: jevRight / jevN, winScoreError: jevWinN ? jevWinAbs / jevWinN : null } : null,
+    calibration: calibrationBins(statsCal),
+    jev: jevN ? { matches: jevN, accuracy: jevRight / jevN, winScoreError: jevWinN ? jevWinAbs / jevWinN : null, calibration: calibrationBins(jevCal) } : null,
   };
 }
 

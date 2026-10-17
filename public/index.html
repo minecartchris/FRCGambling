@@ -83,6 +83,31 @@
         <div class="score blue"><span class="score-num" id="blueScore">--</span><span class="score-cap">Blue predicted</span></div>
       </div>
 
+      <div class="ou" id="ou">
+        <div class="ou-head">
+          <h2>Over / under</h2>
+          <div class="tabs" role="tablist" id="ouKind">
+            <button role="tab" data-kind="winning" aria-selected="true">Winning score</button>
+            <button role="tab" data-kind="red">Red</button>
+            <button role="tab" data-kind="blue">Blue</button>
+            <button role="tab" data-kind="total">Total</button>
+          </div>
+        </div>
+        <div class="ou-main">
+          <div class="ou-line">
+            <button class="icon-btn" id="ouMinus" aria-label="Lower the line">−</button>
+            <label><span class="sr">Line</span><input id="ouLine" type="number" inputmode="decimal" step="0.5" aria-label="Line"></label>
+            <button class="icon-btn" id="ouPlus" aria-label="Raise the line">+</button>
+          </div>
+          <div class="ou-result">
+            <div class="ou-side over"><b id="ouOver">--</b><span>Over</span></div>
+            <div class="ou-side under"><b id="ouUnder">--</b><span>Under</span></div>
+          </div>
+        </div>
+        <div class="ou-lines" id="ouLines"></div>
+        <p class="note" id="ouNote"></p>
+      </div>
+
       <div class="models" id="models"></div>
       <div class="actual" id="actual" hidden></div>
     </section>
@@ -98,6 +123,15 @@
       </div>
     </section>
     <p class="hint">Bias sliders change a team's expected points by up to ±35% of an average team. They're saved in this browser and apply to every match.</p>
+
+    <section class="card bets">
+      <div class="card-head">
+        <h2>Best bets: upcoming matches</h2>
+        <span class="muted-sm" id="betsSub"></span>
+      </div>
+      <div class="bets-list" id="betsList"></div>
+      <button class="text-btn" id="betsMore" hidden></button>
+    </section>
 
     <section class="lower">
       <div class="card matches">
@@ -121,6 +155,13 @@
       <aside class="side">
         <div class="card" id="accuracy"></div>
         <div class="card" id="season" hidden></div>
+        <div class="card calib">
+          <h2>Are the win % honest?</h2>
+          <p class="note">When the model says a team has a 70% chance, it should win about 70% of the time. Dots on the dashed line mean the odds are honest.</p>
+          <div class="tabs small" role="tablist" id="calibSource"></div>
+          <div class="calib-chart" id="calibChart"></div>
+          <details class="calib-table"><summary>Show as table</summary><div id="calibTable"></div></details>
+        </div>
         <div class="card how">
           <h2>How the prediction works</h2>
           <ol>

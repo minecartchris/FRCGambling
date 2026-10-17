@@ -8,8 +8,10 @@
 //    is weighted most, so today's matches count the most.
 // 3. A small "form" term uses historical win rate.
 // 4. Personal bias sliders shift a team's rating up or down.
-// 5. Win probability = P(margin > 0) with margin ~ Normal(mu, sigma), where
-//    sigma comes from how far real scores landed from the fit.
+// 5. Each alliance score ~ Normal(prediction, sd), where sd comes from how far
+//    real scores landed from the fit, widened by spreadScale so that ranges
+//    are honest (on 164 real events, x1.5 makes the 80% range hold 79%).
+//    Win probability, the winning score and over/under all come from it.
 
 export const DEFAULTS = {
   ridge: 3,               // prior strength, in "matches worth" of evidence
@@ -23,10 +25,11 @@ export const DEFAULTS = {
   robust: 0,              // Huber threshold in default-SD units; 0 = plain least squares (auto-tuned)
   elimScale: 1,           // playoff scores relative to quals (auto-tuned)
   priorScale: 1,          // ratings from earlier events x this (teams improve; auto-tuned)
+  spreadScale: 1.5,       // widens score ranges to match real outcomes (auto-tuned)
 };
 
 // Settings the auto-tuner may change. Everything else stays at DEFAULTS.
-export const TUNABLE = ["ridge", "dayDecay", "robust", "elimScale", "priorScale"];
+export const TUNABLE = ["ridge", "dayDecay", "robust", "elimScale", "priorScale", "spreadScale"];
 
 export function normCdf(x) {
   // Abramowitz & Stegun 7.1.26
@@ -136,7 +139,7 @@ export function fitRatings(teams, priors, matches, opts = DEFAULTS) {
   const defaultSd = Math.max(1, opts.defaultSdFrac * avgAlliance);
   const k = rows.length;
   const fitSd = k ? Math.sqrt(sse / k) * opts.residualInflation : defaultSd;
-  const sdAlliance = Math.sqrt((k * fitSd ** 2 + opts.sigmaPriorMatches * defaultSd ** 2) / (k + opts.sigmaPriorMatches));
+  const sdAlliance = Math.sqrt((k * fitSd ** 2 + opts.sigmaPriorMatches * defaultSd ** 2) / (k + opts.sigmaPriorMatches)) * (opts.spreadScale ?? 1);
 
   const ratings = {};
   const priorUsed = {};
@@ -169,22 +172,75 @@ export function predictMatch(match, fit, { bias = {}, form = {}, opts = DEFAULTS
   const redScore = (match.red.teams.reduce((s, t) => s + rate(t), 0) + formAdj / 2) * scale;
   const blueScore = (match.blue.teams.reduce((s, t) => s + rate(t), 0) - formAdj / 2) * scale;
   const margin = redScore - blueScore;
-  const redWinProb = fit.sigmaMargin > 0 ? normCdf(margin / fit.sigmaMargin) : 0.5;
+  const sd = fit.sdAlliance * scale;
+  const redWinProb = sd > 0 ? normCdf(margin / (Math.SQRT2 * sd)) : 0.5;
   const winner = redWinProb >= 0.5 ? "red" : "blue";
-  const winningScore = Math.max(redScore, blueScore);
   return {
     redScore,
     blueScore,
+    sd,
     margin,
     redWinProb,
     blueWinProb: 1 - redWinProb,
     winner,
-    winningScore,
-    // ~80% range for the winning alliance's score
-    winningScoreRange: [Math.max(0, winningScore - 1.28 * fit.sdAlliance), winningScore + 1.28 * fit.sdAlliance],
+    // The winner is often whichever alliance had the better day, so the
+    // winning score runs above both predictions: use the middle of
+    // max(red, blue) instead of the larger prediction (miss 55.8 -> 54.1 pts).
+    winningScore: winQuantile(redScore, blueScore, sd, 0.5),
+    // 80% range for the winning score
+    winningScoreRange: [Math.max(0, winQuantile(redScore, blueScore, sd, 0.1)), winQuantile(redScore, blueScore, sd, 0.9)],
     teamPoints: Object.fromEntries([...match.red.teams, ...match.blue.teams].map((t) => [t, rate(t) * scale])),
     formAdj,
   };
+}
+
+// P(winning score <= x) = P(red <= x) * P(blue <= x)
+function winCdf(x, r, b, sd) {
+  return sd > 0 ? normCdf((x - r) / sd) * normCdf((x - b) / sd) : x >= Math.max(r, b) ? 1 : 0;
+}
+
+export function winQuantile(r, b, sd, q) {
+  if (!(sd > 0)) return Math.max(r, b);
+  let lo = Math.min(r, b) - 5 * sd, hi = Math.max(r, b) + 5 * sd;
+  for (let i = 0; i < 50; i++) {
+    const mid = (lo + hi) / 2;
+    if (winCdf(mid, r, b, sd) < q) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// Over/under: probability the chosen score finishes above `line`.
+// kind: "winning" | "red" | "blue" | "total"
+export function overProb(pred, kind, line) {
+  const { redScore: r, blueScore: b, sd } = pred;
+  if (kind === "red") return 1 - normCdf((line - r) / sd);
+  if (kind === "blue") return 1 - normCdf((line - b) / sd);
+  if (kind === "total") return 1 - normCdf((line - r - b) / (Math.SQRT2 * sd));
+  return 1 - winCdf(line, r, b, sd);
+}
+
+export function expectedLine(pred, kind) {
+  if (kind === "red") return pred.redScore;
+  if (kind === "blue") return pred.blueScore;
+  if (kind === "total") return pred.redScore + pred.blueScore;
+  return pred.winningScore;
+}
+
+// Favorite-probability buckets vs how often the favorite actually won.
+export function calibrationBins(items) {
+  const edges = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0001];
+  const bins = edges.slice(0, -1).map((lo, i) => ({ lo, hi: Math.min(1, edges[i + 1]), n: 0, wins: 0, sumP: 0 }));
+  for (const { p, won } of items) {
+    const fav = Math.max(p, 1 - p);
+    const favWon = p >= 0.5 ? won : !won;
+    const bin = bins.find((b) => fav >= b.lo && fav < (b.hi === 1 ? 1.0001 : b.hi));
+    if (!bin) continue;
+    bin.n++;
+    bin.sumP += fav;
+    if (favWon) bin.wins++;
+  }
+  return bins.map((b) => ({ lo: b.lo, hi: b.hi, n: b.n, predicted: b.n ? b.sumP / b.n : null, actual: b.n ? b.wins / b.n : null }));
 }
 
 // Replay the event: predict every completed match using only earlier matches.
@@ -194,6 +250,7 @@ export function backtest(teams, priors, matches, form, opts = DEFAULTS) {
   let n = 0, correct = 0, brier = 0;
   const score = new ScoreStats();
   const thirds = [new ScoreStats(), new ScoreStats(), new ScoreStats()];
+  const calib = [];
   for (let i = 0; i < played.length; i++) {
     const m = played[i];
     const fit = fitRatings(teams, priors, played.slice(0, i), opts);
@@ -210,6 +267,7 @@ export function backtest(teams, priors, matches, form, opts = DEFAULTS) {
       n++;
       if (ok) correct++;
       brier += (p.redWinProb - actual) ** 2;
+      calib.push({ p: p.redWinProb, won: actual === 1 });
     }
     score.add(p, m);
     thirds[Math.min(2, Math.floor((3 * i) / played.length))].add(p, m);
@@ -222,6 +280,7 @@ export function backtest(teams, priors, matches, form, opts = DEFAULTS) {
       brier: n ? brier / n : null,
       ...score.summary(),
       byThird: thirds.map((t) => t.summary().scoreError),
+      calibration: calibrationBins(calib),
     },
   };
 }
@@ -235,6 +294,8 @@ export class ScoreStats {
     this.in5 = 0;
     this.win = 0;    // matches graded for winning score
     this.winAbs = 0;
+    this.covN = 0;   // alliance scores with a known spread
+    this.in80 = 0;   // ...that landed inside the predicted 80% range
   }
   add(pred, match) {
     for (const [p, a] of [[pred.redScore, match.red.score], [pred.blueScore, match.blue.score]]) {
@@ -243,9 +304,14 @@ export class ScoreStats {
       this.abs += e;
       if (e <= 25) this.in25++;
       if (e <= 5) this.in5++;
+      if (pred.sd > 0) {
+        this.covN++;
+        if (e <= 1.2816 * pred.sd) this.in80++;
+      }
     }
     this.win++;
-    this.winAbs += Math.abs(Math.max(pred.redScore, pred.blueScore) - Math.max(match.red.score, match.blue.score));
+    const predictedWin = pred.winningScore ?? Math.max(pred.redScore, pred.blueScore);
+    this.winAbs += Math.abs(predictedWin - Math.max(match.red.score, match.blue.score));
   }
   summary() {
     return {
@@ -253,6 +319,7 @@ export class ScoreStats {
       within25: this.n ? this.in25 / this.n : null,
       within5: this.n ? this.in5 / this.n : null,
       winScoreError: this.win ? this.winAbs / this.win : null,
+      rangeHit: this.covN ? this.in80 / this.covN : null,
       scored: this.win,
     };
   }

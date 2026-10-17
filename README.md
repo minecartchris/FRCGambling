@@ -10,6 +10,9 @@ Who will win an FRC match, and what will the winning score be?
 - **Personal bias sliders** for every team, from -100 to +100, saved in your browser.
 - **All matches** (upcoming, completed, filter by team). Each completed match shows whether the pre-match pick was right.
 - **Team profiles**: rank, record, rating trend, a score chart, EPA breakdown, upcoming matches, and results.
+- **Over / under**: set a line for the winning score, either alliance's score, or total points, and see the chance it goes over or under, with a ladder of nearby lines.
+- **Best bets**: the event's upcoming matches ranked by confidence (Lock / Strong / Lean / Toss-up), each with how often picks at that confidence actually won.
+- **Are the win % honest?**: a chart comparing predicted chances with how often favorites really won, for this event, the last 60 events, and the live record (stats and Jev).
 - **Score accuracy**: every completed match is re-predicted using only earlier information. The panel shows the average score miss, the share within ±25 and ±5 points, and how the miss shrinks from early to late in the event.
 - **Live track record**: the last prediction before each match (stats and Jev) is saved and graded when the score posts, including whether newer predictions beat older ones.
 - **Auto-tuning**: once a day the server replays the 60 most recent finished events and keeps the settings with the smallest score miss. Tuned settings survive restarts.
@@ -23,6 +26,11 @@ Measured on real 2026 events:
 | Original model (164 regular-season events) | 59.2 | 30% |
 | + team history from earlier events + tuning | 52.5 | 35% |
 | Hindsight floor (fit with every result of the event known) | 33.3 | 50% |
+
+Two more findings from the same data:
+
+- **Score ranges were too narrow.** Only 63% of real scores landed inside the model's "80%" range. The spread is now widened (auto-tuned, about 1.35–1.5×) so the ranges, over/under odds, and win percentages are honest. The winning score is now predicted as the middle of the possible outcomes rather than the larger of the two alliance predictions, since the winner is usually the alliance that had the better day (miss 55.8 → 54.1).
+- **Penalties aren't worth modeling separately.** They average 5 of 198 points per alliance, and 62% of alliances receive none. Fitting on penalty-free scores changed the miss by 0.1 points.
 
 Average alliance score in that set was 185. Even in hindsight a typical score lands about 33 points from the fit, because robots break, penalties happen, and game pieces bounce. Being within ±25 most of the time is a realistic aim, but no model can do it every match, and ±5 is mostly luck.
 
